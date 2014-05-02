@@ -25,7 +25,6 @@
 #define __reverse_ffz(x) __reverse_ffs(~(x))
 
 static struct kmem_cache *discard_entry_slab;
-static struct kmem_cache *flush_cmd_slab;
 
 /*
  * __reverse_ffs is copied from include/asm-generic/bitops/__ffs.h since
@@ -197,6 +196,33 @@ void f2fs_balance_fs_bg(struct f2fs_sb_info *sbi)
 		f2fs_sync_fs(sbi->sb, true);
 }
 
+struct __submit_bio_ret {
+	struct completion event;
+	int error;
+};
+
+static void __submit_bio_wait_endio(struct bio *bio, int error)
+{
+	struct __submit_bio_ret *ret = bio->bi_private;
+
+	ret->error = error;
+	complete(&ret->event);
+}
+
+static int __submit_bio_wait(int rw, struct bio *bio)
+{
+	struct __submit_bio_ret ret;
+
+	rw |= REQ_SYNC;
+	init_completion(&ret.event);
+	bio->bi_private = &ret;
+	bio->bi_end_io = __submit_bio_wait_endio;
+	submit_bio(rw, bio);
+	wait_for_completion(&ret.event);
+
+	return ret.error;
+}
+
 static int issue_flush_thread(void *data)
 {
 	struct f2fs_sb_info *sbi = data;
@@ -219,7 +245,7 @@ repeat:
 		int ret;
 
 		bio->bi_bdev = sbi->sb->s_bdev;
-		ret = submit_bio_wait(WRITE_FLUSH, bio);
+		ret = __submit_bio_wait(WRITE_FLUSH, bio);
 
 		for (cmd = fcc->dispatch_list; cmd; cmd = next) {
 			cmd->ret = ret;
@@ -238,30 +264,28 @@ repeat:
 int f2fs_issue_flush(struct f2fs_sb_info *sbi)
 {
 	struct flush_cmd_control *fcc = SM_I(sbi)->cmd_control_info;
-	struct flush_cmd *cmd;
-	int ret;
+	struct flush_cmd cmd;
 
 	if (!test_opt(sbi, FLUSH_MERGE))
 		return blkdev_issue_flush(sbi->sb->s_bdev, GFP_KERNEL, NULL);
 
-	cmd = f2fs_kmem_cache_alloc(flush_cmd_slab, GFP_ATOMIC | __GFP_ZERO);
-	init_completion(&cmd->wait);
+	init_completion(&cmd.wait);
+	cmd.next = NULL;
 
 	spin_lock(&fcc->issue_lock);
 	if (fcc->issue_list)
-		fcc->issue_tail->next = cmd;
+		fcc->issue_tail->next = &cmd;
 	else
-		fcc->issue_list = cmd;
-	fcc->issue_tail = cmd;
+		fcc->issue_list = &cmd;
+	fcc->issue_tail = &cmd;
 	spin_unlock(&fcc->issue_lock);
 
 	if (!fcc->dispatch_list)
 		wake_up(&fcc->flush_wait_queue);
 
-	wait_for_completion(&cmd->wait);
-	ret = cmd->ret;
-	kmem_cache_free(flush_cmd_slab, cmd);
-	return ret;
+	wait_for_completion(&cmd.wait);
+
+	return cmd.ret;
 }
 
 int create_flush_cmd_control(struct f2fs_sb_info *sbi)
@@ -1172,7 +1196,7 @@ static inline bool is_merged_page(struct f2fs_sb_info *sbi,
 	if (!io->bio)
 		goto out;
 
-	bio_for_each_segment_all(bvec, io->bio, i) {
+	__bio_for_each_segment(bvec, io->bio, i, 0) {
 		if (page == bvec->bv_page) {
 			up_read(&io->io_rwsem);
 			return true;
@@ -1888,8 +1912,6 @@ int build_segment_manager(struct f2fs_sb_info *sbi)
 
 	/* init sm info */
 	sbi->sm_info = sm_info;
-	INIT_LIST_HEAD(&sm_info->wblist_head);
-	spin_lock_init(&sm_info->wblist_lock);
 	sm_info->seg0_blkaddr = le32_to_cpu(raw_super->segment0_blkaddr);
 	sm_info->main_blkaddr = le32_to_cpu(raw_super->main_blkaddr);
 	sm_info->segment_count = le32_to_cpu(raw_super->segment_count);
@@ -2036,17 +2058,10 @@ int __init create_segment_manager_caches(void)
 			sizeof(struct discard_entry));
 	if (!discard_entry_slab)
 		return -ENOMEM;
-	flush_cmd_slab = f2fs_kmem_cache_create("flush_command",
-			sizeof(struct flush_cmd));
-	if (!flush_cmd_slab) {
-		kmem_cache_destroy(discard_entry_slab);
-		return -ENOMEM;
-	}
 	return 0;
 }
 
 void destroy_segment_manager_caches(void)
 {
 	kmem_cache_destroy(discard_entry_slab);
-	kmem_cache_destroy(flush_cmd_slab);
 }

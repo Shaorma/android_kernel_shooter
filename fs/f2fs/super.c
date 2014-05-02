@@ -510,9 +510,9 @@ static int f2fs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	return 0;
 }
 
-static int f2fs_show_options(struct seq_file *seq, struct dentry *root)
+static int f2fs_show_options(struct seq_file *seq, struct vfsmount *vfs)
 {
-	struct f2fs_sb_info *sbi = F2FS_SB(root->d_sb);
+	struct f2fs_sb_info *sbi = F2FS_SB(vfs->mnt_sb);
 
 	if (!f2fs_readonly(sbi->sb) && test_opt(sbi, BG_GC))
 		seq_printf(seq, ",background_gc=%s", "on");
@@ -578,7 +578,7 @@ static int segment_info_seq_show(struct seq_file *seq, void *offset)
 
 static int segment_info_open_fs(struct inode *inode, struct file *file)
 {
-	return single_open(file, segment_info_seq_show, PDE_DATA(inode));
+	return single_open(file, segment_info_seq_show, PDE(inode)->data);
 }
 
 static const struct file_operations f2fs_seq_segment_info_fops = {
@@ -689,9 +689,7 @@ static struct inode *f2fs_nfs_get_inode(struct super_block *sb,
 	struct f2fs_sb_info *sbi = F2FS_SB(sb);
 	struct inode *inode;
 
-	if (unlikely(ino < F2FS_ROOT_INO(sbi)))
-		return ERR_PTR(-ESTALE);
-	if (unlikely(ino >= NM_I(sbi)->max_nid))
+	if (check_nid_range(sbi, ino))
 		return ERR_PTR(-ESTALE);
 
 	/*
@@ -930,7 +928,6 @@ static int f2fs_fill_super(struct super_block *sb, void *data, int silent)
 		goto free_sb_buf;
 
 	sb->s_maxbytes = max_file_size(le32_to_cpu(raw_super->log_blocksize));
-	sb->s_max_links = F2FS_LINK_MAX;
 	get_random_bytes(&sbi->s_next_generation, sizeof(u32));
 
 	sb->s_op = &f2fs_sops;
@@ -1040,7 +1037,7 @@ static int f2fs_fill_super(struct super_block *sb, void *data, int silent)
 		goto free_root_inode;
 	}
 
-	sb->s_root = d_make_root(root); /* allocate root dentry */
+	sb->s_root = d_alloc_root(root); /* allocate root dentry */
 	if (!sb->s_root) {
 		err = -ENOMEM;
 		goto free_root_inode;
@@ -1101,8 +1098,7 @@ free_proc:
 	}
 	f2fs_destroy_stats(sbi);
 free_root_inode:
-	dput(sb->s_root);
-	sb->s_root = NULL;
+	iput(root);
 free_node_inode:
 	iput(sbi->node_inode);
 free_nm:

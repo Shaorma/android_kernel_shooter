@@ -21,7 +21,6 @@
 #include <linux/rwsem.h>
 #include <linux/f2fs_fs.h>
 #include <linux/security.h>
-#include <linux/posix_acl_xattr.h>
 #include "f2fs.h"
 #include "xattr.h"
 
@@ -156,10 +155,6 @@ static int f2fs_xattr_advise_set(struct dentry *dentry, const char *name,
 }
 
 #ifdef CONFIG_F2FS_FS_SECURITY
-static int __f2fs_setxattr(struct inode *inode, int index,
-			const char *name, const void *value, size_t size,
-			struct page *ipage, int);
-
 static int f2fs_initxattrs(struct inode *inode, const struct xattr *xattr_array,
 		void *page)
 {
@@ -167,7 +162,7 @@ static int f2fs_initxattrs(struct inode *inode, const struct xattr *xattr_array,
 	int err = 0;
 
 	for (xattr = xattr_array; xattr->name != NULL; xattr++) {
-		err = __f2fs_setxattr(inode, F2FS_XATTR_INDEX_SECURITY,
+		err = f2fs_setxattr(inode, F2FS_XATTR_INDEX_SECURITY,
 				xattr->name, xattr->value,
 				xattr->value_len, (struct page *)page, 0);
 		if (err < 0)
@@ -179,7 +174,7 @@ static int f2fs_initxattrs(struct inode *inode, const struct xattr *xattr_array,
 int f2fs_init_security(struct inode *inode, struct inode *dir,
 				const struct qstr *qstr, struct page *ipage)
 {
-	return security_inode_init_security(inode, dir, qstr,
+	return security_new_inode_init_security(inode, dir, qstr,
 				&f2fs_initxattrs, ipage);
 }
 #endif
@@ -219,8 +214,8 @@ const struct xattr_handler f2fs_xattr_security_handler = {
 static const struct xattr_handler *f2fs_xattr_handler_map[] = {
 	[F2FS_XATTR_INDEX_USER] = &f2fs_xattr_user_handler,
 #ifdef CONFIG_F2FS_FS_POSIX_ACL
-	[F2FS_XATTR_INDEX_POSIX_ACL_ACCESS] = &posix_acl_access_xattr_handler,
-	[F2FS_XATTR_INDEX_POSIX_ACL_DEFAULT] = &posix_acl_default_xattr_handler,
+	[F2FS_XATTR_INDEX_POSIX_ACL_ACCESS] = &f2fs_xattr_acl_access_handler,
+	[F2FS_XATTR_INDEX_POSIX_ACL_DEFAULT] = &f2fs_xattr_acl_default_handler,
 #endif
 	[F2FS_XATTR_INDEX_TRUSTED] = &f2fs_xattr_trusted_handler,
 #ifdef CONFIG_F2FS_FS_SECURITY
@@ -232,8 +227,8 @@ static const struct xattr_handler *f2fs_xattr_handler_map[] = {
 const struct xattr_handler *f2fs_xattr_handlers[] = {
 	&f2fs_xattr_user_handler,
 #ifdef CONFIG_F2FS_FS_POSIX_ACL
-	&posix_acl_access_xattr_handler,
-	&posix_acl_default_xattr_handler,
+	&f2fs_xattr_acl_access_handler,
+	&f2fs_xattr_acl_default_handler,
 #endif
 	&f2fs_xattr_trusted_handler,
 #ifdef CONFIG_F2FS_FS_SECURITY
@@ -603,6 +598,10 @@ int f2fs_setxattr(struct inode *inode, int index, const char *name,
 	struct f2fs_sb_info *sbi = F2FS_SB(inode->i_sb);
 	int err;
 
+	/* this case is only from init_inode_metadata */
+	if (ipage)
+		return __f2fs_setxattr(inode, index, name, value,
+						size, ipage, flags);
 	f2fs_balance_fs(sbi);
 
 	f2fs_lock_op(sbi);
